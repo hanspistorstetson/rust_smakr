@@ -1,503 +1,624 @@
-//! A small snake game done after watching
-//! <https://www.youtube.com/watch?v=HCwMb0KslX8>
-//! to showcase ggez and how it relates/differs from piston.
-//!
-//! Note that this example is meant to highlight the general
-//! structure of a ggez game. Some of the details may need to
-//! be changed to scale the game. For example, if we needed to
-//! draw hundreds or thousands of shapes, a SpriteBatch is going
-//! to offer far better performance than the direct draw calls
-//! that this example uses.
-//!
-//! Author: @termhn
-//! Original repo: https://github.com/termhn/ggez_snake
+//! An Asteroids-ish example game to show off ggez.
+//! The idea is that this game is simple but still
+//! non-trivial enough to be interesting.
 
-// First we'll import the crates we need for our game;
-// in this case that is just `ggez` and `rand`.
 use ggez;
+use ggez::audio;
+use ggez::audio::SoundSource;
+use ggez::conf;
+use ggez::event::{self, EventHandler, KeyCode, KeyMods};
+use ggez::graphics;
+use ggez::graphics::mint;
+use ggez::timer;
+use ggez::{Context, ContextBuilder, GameResult};
+use nalgebra as na;
 use rand;
 
-// Next we need to actually `use` the pieces of ggez that we are going
-// to need frequently.
-use ggez::event::{KeyCode, KeyMods};
-use ggez::{event, graphics, Context, GameResult};
+use std::env;
+use std::path;
 
-// We'll bring in some things from `std` to help us in the future.
-use std::collections::LinkedList;
-use std::time::{Duration, Instant};
+type Point2 = na::Point2<f32>;
+type Vector2 = na::Vector2<f32>;
 
-// And finally bring the `Rng` trait into scope so that we can generate
-// some random numbers later.
-use rand::Rng;
-
-// The first thing we want to do is set up some constants that will help us out later.
-
-// Here we define the size of our game board in terms of how many grid
-// cells it will take up. We choose to make a 30 x 20 game board.
-const GRID_SIZE: (i16, i16) = (30, 20);
-// Now we define the pixel size of each tile, which we make 32x32 pixels.
-const GRID_CELL_SIZE: (i16, i16) = (32, 32);
-
-// Next we define how large we want our actual window to be by multiplying
-// the components of our grid size by its corresponding pixel size.
-const SCREEN_SIZE: (f32, f32) = (
-    GRID_SIZE.0 as f32 * GRID_CELL_SIZE.0 as f32,
-    GRID_SIZE.1 as f32 * GRID_CELL_SIZE.1 as f32,
-);
-
-// Here we're defining how many quickly we want our game to update. This will be
-// important later so that we don't have our snake fly across the screen because
-// it's moving a full tile every frame.
-const UPDATES_PER_SECOND: f32 = 8.0;
-// And we get the milliseconds of delay that this update rate corresponds to.
-const MILLIS_PER_UPDATE: u64 = (1.0 / UPDATES_PER_SECOND * 1000.0) as u64;
-
-/// Now we define a struct that will hold an entity's position on our game board
-/// or grid which we defined above. We'll use signed integers because we only want
-/// to store whole numbers, and we need them to be signed so that they work properly
-/// with our modulus arithmetic later.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-struct GridPosition {
-    x: i16,
-    y: i16,
+struct P2 {
+    x: f32,
+    y: f32,
 }
 
-/// This is a trait that provides a modulus function that works for negative values
-/// rather than just the standard remainder op (%) which does not. We'll use this
-/// to get our snake to wrap from one side of the game board around to the other
-/// when it goes off the top, bottom, left, or right side of the screen.
-trait ModuloSigned {
-    fn modulo(&self, n: Self) -> Self;
-}
-
-/// Here we implement our `ModuloSigned` trait for any type T which implements
-/// `Add` (the `+` operator) with an output type T and Rem (the `%` operator)
-/// that also has an output type of T, and that can be cloned. These are the bounds
-/// that we need in order to implement a modulus function that works for negative numbers
-/// as well.
-impl<T> ModuloSigned for T
-where
-    T: std::ops::Add<Output = T> + std::ops::Rem<Output = T> + Clone,
-{
-    fn modulo(&self, n: T) -> T {
-        // Because of our trait bounds, we can now apply these operators.
-        (self.clone() % n.clone() + n.clone()) % n.clone()
+impl From<P2> for Point2 {
+    fn from(other: P2) -> Point2 {
+        Point2::new(other.x, other.y)
     }
 }
 
-impl GridPosition {
-    /// We make a standard helper function so that we can create a new `GridPosition`
-    /// more easily.
-    pub fn new(x: i16, y: i16) -> Self {
-        GridPosition { x, y }
-    }
-
-    /// As well as a helper function that will give us a random `GridPosition` from
-    /// `(0, 0)` to `(max_x, max_y)`
-    pub fn random(max_x: i16, max_y: i16) -> Self {
-        let mut rng = rand::thread_rng();
-        // We can use `.into()` to convert from `(i16, i16)` to a `GridPosition` since
-        // we implement `From<(i16, i16)>` for `GridPosition` below.
-        (
-            rng.gen_range::<i16, i16, i16>(0, max_x),
-            rng.gen_range::<i16, i16, i16>(0, max_y),
-        )
-            .into()
-    }
-
-    /// We'll make another helper function that takes one grid position and returns a new one after
-    /// making one move in the direction of `dir`. We use our `SignedModulo` trait
-    /// above, which is now implemented on `i16` because it satisfies the trait bounds,
-    /// to automatically wrap around within our grid size if the move would have otherwise
-    /// moved us off the board to the top, bottom, left, or right.
-    pub fn new_from_move(pos: GridPosition, dir: Direction) -> Self {
-        match dir {
-            Direction::Up => GridPosition::new(pos.x, (pos.y - 1).modulo(GRID_SIZE.1)),
-            Direction::Down => GridPosition::new(pos.x, (pos.y + 1).modulo(GRID_SIZE.1)),
-            Direction::Left => GridPosition::new((pos.x - 1).modulo(GRID_SIZE.0), pos.y),
-            Direction::Right => GridPosition::new((pos.x + 1).modulo(GRID_SIZE.0), pos.y),
+impl From<Point2> for P2 {
+    fn from(other: Point2) -> P2 {
+        P2 {
+            x: other.x,
+            y: other.y,
         }
     }
 }
 
-/// We implement the `From` trait, which in this case allows us to convert easily between
-/// a GridPosition and a ggez `graphics::Rect` which fills that grid cell.
-/// Now we can just call `.into()` on a `GridPosition` where we want a
-/// `Rect` that represents that grid cell.
-impl From<GridPosition> for graphics::Rect {
-    fn from(pos: GridPosition) -> Self {
-        graphics::Rect::new_i32(
-            pos.x as i32 * GRID_CELL_SIZE.0 as i32,
-            pos.y as i32 * GRID_CELL_SIZE.1 as i32,
-            GRID_CELL_SIZE.0 as i32,
-            GRID_CELL_SIZE.1 as i32,
-        )
+/// *********************************************************************
+/// Basic stuff, make some helpers for vector functions.
+/// We use the nalgebra math library to provide lots of
+/// math stuff.  This just adds some helpers.
+/// **********************************************************************
+
+/// Create a unit vector representing the
+/// given angle (in radians)
+fn vec_from_angle(angle: f32) -> Vector2 {
+    let vx = angle.sin();
+    let vy = angle.cos();
+    Vector2::new(vx, vy)
+}
+
+/// Makes a random `Vector2` with the given max magnitude.
+fn random_vec(max_magnitude: f32) -> Vector2 {
+    let angle = rand::random::<f32>() * 2.0 * std::f32::consts::PI;
+    let mag = rand::random::<f32>() * max_magnitude;
+    vec_from_angle(angle) * (mag)
+}
+
+/// *********************************************************************
+/// Now we define our Actors.
+/// An Actor is anything in the game world.
+/// We're not *quite* making a real entity-component system but it's
+/// pretty close.  For a more complicated game you would want a
+/// real ECS, but for this it's enough to say that all our game objects
+/// contain pretty much the same data.
+/// **********************************************************************
+#[derive(Debug)]
+enum ActorType {
+    Player,
+    Rock,
+    Shot,
+}
+
+#[derive(Debug)]
+struct Actor {
+    tag: ActorType,
+    pos: Point2,
+    facing: f32,
+    velocity: Vector2,
+    ang_vel: f32,
+    bbox_size: f32,
+
+    // I am going to lazily overload "life" with a
+    // double meaning:
+    // for shots, it is the time left to live,
+    // for players and rocks, it is the actual hit points.
+    life: f32,
+}
+
+const PLAYER_LIFE: f32 = 1.0;
+const SHOT_LIFE: f32 = 2.0;
+const ROCK_LIFE: f32 = 1.0;
+
+const PLAYER_BBOX: f32 = 12.0;
+const ROCK_BBOX: f32 = 12.0;
+const SHOT_BBOX: f32 = 6.0;
+
+const MAX_ROCK_VEL: f32 = 50.0;
+
+/// *********************************************************************
+/// Now we have some constructor functions for different game objects.
+/// **********************************************************************
+
+fn create_player() -> Actor {
+    Actor {
+        tag: ActorType::Player,
+        pos: Point2::origin(),
+        facing: 0.,
+        velocity: na::zero(),
+        ang_vel: 0.,
+        bbox_size: PLAYER_BBOX,
+        life: PLAYER_LIFE,
     }
 }
 
-/// And here we implement `From` again to allow us to easily convert between
-/// `(i16, i16)` and a `GridPosition`.
-impl From<(i16, i16)> for GridPosition {
-    fn from(pos: (i16, i16)) -> Self {
-        GridPosition { x: pos.0, y: pos.1 }
+fn create_rock() -> Actor {
+    Actor {
+        tag: ActorType::Rock,
+        pos: Point2::origin(),
+        facing: 0.,
+        velocity: na::zero(),
+        ang_vel: 0.,
+        bbox_size: ROCK_BBOX,
+        life: ROCK_LIFE,
     }
 }
 
-/// Next we create an enum that will represent all the possible
-/// directions that our snake could move.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Direction {
-    Up,
-    Down,
-    Left,
-    Right,
+fn create_shot() -> Actor {
+    Actor {
+        tag: ActorType::Shot,
+        pos: Point2::origin(),
+        facing: 0.,
+        velocity: na::zero(),
+        ang_vel: SHOT_ANG_VEL,
+        bbox_size: SHOT_BBOX,
+        life: SHOT_LIFE,
+    }
 }
 
-impl Direction {
-    /// We create a helper function that will allow us to easily get the inverse
-    /// of a `Direction` which we can use later to check if the player should be
-    /// able to move the snake in a certain direction.
-    pub fn inverse(&self) -> Self {
-        match *self {
-            Direction::Up => Direction::Down,
-            Direction::Down => Direction::Up,
-            Direction::Left => Direction::Right,
-            Direction::Right => Direction::Left,
+/// Create the given number of rocks.
+/// Makes sure that none of them are within the
+/// given exclusion zone (nominally the player)
+/// Note that this *could* create rocks outside the
+/// bounds of the playing field, so it should be
+/// called before `wrap_actor_position()` happens.
+fn create_rocks(num: i32, exclusion: Point2, min_radius: f32, max_radius: f32) -> Vec<Actor> {
+    assert!(max_radius > min_radius);
+    let new_rock = |_| {
+        let mut rock = create_rock();
+        let r_angle = rand::random::<f32>() * 2.0 * std::f32::consts::PI;
+        let r_distance = rand::random::<f32>() * (max_radius - min_radius) + min_radius;
+        rock.pos = exclusion + vec_from_angle(r_angle) * r_distance;
+        rock.velocity = random_vec(MAX_ROCK_VEL);
+        rock
+    };
+    (0..num).map(new_rock).collect()
+}
+
+/// *********************************************************************
+/// Now we make functions to handle physics.  We do simple Newtonian
+/// physics (so we do have inertia), and cap the max speed so that we
+/// don't have to worry too much about small objects clipping through
+/// each other.
+///
+/// Our unit of world space is simply pixels, though we do transform
+/// the coordinate system so that +y is up and -y is down.
+/// **********************************************************************
+
+/// How fast shots move.
+const SHOT_SPEED: f32 = 200.0;
+/// Angular velocity of how fast shots rotate.
+const SHOT_ANG_VEL: f32 = 0.1;
+
+/// Acceleration in pixels per second.
+const PLAYER_THRUST: f32 = 100.0;
+/// Rotation in radians per second.
+const PLAYER_TURN_RATE: f32 = 3.0;
+/// Refire delay between shots, in seconds.
+const PLAYER_SHOT_TIME: f32 = 0.5;
+
+fn player_handle_input(actor: &mut Actor, input: &InputState, dt: f32) {
+    actor.facing += dt * PLAYER_TURN_RATE * input.xaxis;
+
+    if input.yaxis > 0.0 {
+        player_thrust(actor, dt);
+    }
+}
+
+fn player_thrust(actor: &mut Actor, dt: f32) {
+    let direction_vector = vec_from_angle(actor.facing);
+    let thrust_vector = direction_vector * (PLAYER_THRUST);
+    actor.velocity += thrust_vector * (dt);
+}
+
+const MAX_PHYSICS_VEL: f32 = 250.0;
+
+fn update_actor_position(actor: &mut Actor, dt: f32) {
+    // Clamp the velocity to the max efficiently
+    let norm_sq = actor.velocity.norm_squared();
+    if norm_sq > MAX_PHYSICS_VEL.powi(2) {
+        actor.velocity = actor.velocity / norm_sq.sqrt() * MAX_PHYSICS_VEL;
+    }
+    let dv = actor.velocity * (dt);
+    actor.pos += dv;
+    actor.facing += actor.ang_vel;
+}
+
+/// Takes an actor and wraps its position to the bounds of the
+/// screen, so if it goes off the left side of the screen it
+/// will re-enter on the right side and so on.
+fn wrap_actor_position(actor: &mut Actor, sx: f32, sy: f32) {
+    // Wrap screen
+    let screen_x_bounds = sx / 2.0;
+    let screen_y_bounds = sy / 2.0;
+    if actor.pos.x > screen_x_bounds {
+        actor.pos.x -= sx;
+    } else if actor.pos.x < -screen_x_bounds {
+        actor.pos.x += sx;
+    };
+    if actor.pos.y > screen_y_bounds {
+        actor.pos.y -= sy;
+    } else if actor.pos.y < -screen_y_bounds {
+        actor.pos.y += sy;
+    }
+}
+
+fn handle_timed_life(actor: &mut Actor, dt: f32) {
+    actor.life -= dt;
+}
+
+/// Translates the world coordinate system, which
+/// has Y pointing up and the origin at the center,
+/// to the screen coordinate system, which has Y
+/// pointing downward and the origin at the top-left,
+fn world_to_screen_coords(screen_width: f32, screen_height: f32, point: Point2) -> Point2 {
+    let x = point.x + screen_width / 2.0;
+    let y = screen_height - (point.y + screen_height / 2.0);
+    Point2::new(x, y)
+}
+
+/// **********************************************************************
+/// So that was the real meat of our game.  Now we just need a structure
+/// to contain the images, sounds, etc. that we need to hang on to; this
+/// is our "asset management system".  All the file names and such are
+/// just hard-coded.
+/// **********************************************************************
+
+struct Assets {
+    player_image: graphics::Image,
+    shot_image: graphics::Image,
+    rock_image: graphics::Image,
+    font: graphics::Font,
+    shot_sound: audio::Source,
+    hit_sound: audio::Source,
+}
+
+impl Assets {
+    fn new(ctx: &mut Context) -> GameResult<Assets> {
+        let player_image = graphics::Image::new(ctx, "/player.png")?;
+        let shot_image = graphics::Image::new(ctx, "/shot.png")?;
+        let rock_image = graphics::Image::new(ctx, "/rock.png")?;
+        let font = graphics::Font::new(ctx, "/DejaVuSerif.ttf")?;
+
+        let shot_sound = audio::Source::new(ctx, "/pew.ogg")?;
+        let hit_sound = audio::Source::new(ctx, "/boom.ogg")?;
+
+        Ok(Assets {
+            player_image,
+            shot_image,
+            rock_image,
+            font,
+            shot_sound,
+            hit_sound,
+        })
+    }
+
+    fn actor_image(&mut self, actor: &Actor) -> &mut graphics::Image {
+        match actor.tag {
+            ActorType::Player => &mut self.player_image,
+            ActorType::Rock => &mut self.rock_image,
+            ActorType::Shot => &mut self.shot_image,
         }
     }
+}
 
-    /// We also create a helper function that will let us convert between a
-    /// `ggez` `Keycode` and the `Direction` that it represents. Of course,
-    /// not every keycode represents a direction, so we return `None` if this
-    /// is the case.
-    pub fn from_keycode(key: KeyCode) -> Option<Direction> {
-        match key {
-            KeyCode::Up => Some(Direction::Up),
-            KeyCode::Down => Some(Direction::Down),
-            KeyCode::Left => Some(Direction::Left),
-            KeyCode::Right => Some(Direction::Right),
-            _ => None,
+/// **********************************************************************
+/// The `InputState` is exactly what it sounds like, it just keeps track of
+/// the user's input state so that we turn keyboard events into something
+/// state-based and device-independent.
+/// **********************************************************************
+#[derive(Debug)]
+struct InputState {
+    xaxis: f32,
+    yaxis: f32,
+    fire: bool,
+}
+
+impl Default for InputState {
+    fn default() -> Self {
+        InputState {
+            xaxis: 0.0,
+            yaxis: 0.0,
+            fire: false,
         }
     }
 }
 
-/// This is mostly just a semantic abstraction over a `GridPosition` to represent
-/// a segment of the snake. It could be useful to, say, have each segment contain its
-/// own color or something similar. This is an exercise left up to the reader ;)
-#[derive(Clone, Copy, Debug)]
-struct Segment {
-    pos: GridPosition,
+/// **********************************************************************
+/// Now we're getting into the actual game loop.  The `MainState` is our
+/// game's "global" state, it keeps track of everything we need for
+/// actually running the game.
+///
+/// We simply keep game objects in a vector for each actor type, and we
+/// probably mingle gameplay-state (like score) and hardware-state
+/// (like `input`) a little more than we should, but for something
+/// this small it hardly matters.
+/// **********************************************************************
+
+struct MainState {
+    player: Actor,
+    shots: Vec<Actor>,
+    rocks: Vec<Actor>,
+    level: i32,
+    score: i32,
+    assets: Assets,
+    screen_width: f32,
+    screen_height: f32,
+    input: InputState,
+    player_shot_timeout: f32,
 }
 
-impl Segment {
-    pub fn new(pos: GridPosition) -> Self {
-        Segment { pos }
-    }
-}
+impl MainState {
+    fn new(ctx: &mut Context) -> GameResult<MainState> {
+        println!("Game resource path: {:?}", ctx.filesystem);
 
-/// This is again an abstraction over a `GridPosition` that represents
-/// a piece of food the snake can eat. It can draw itself.
-struct Food {
-    pos: GridPosition,
-}
+        print_instructions();
 
-impl Food {
-    pub fn new(pos: GridPosition) -> Self {
-        Food { pos }
-    }
+        let assets = Assets::new(ctx)?;
+        let player = create_player();
+        let rocks = create_rocks(5, player.pos, 100.0, 250.0);
 
-    /// Here is the first time we see what drawing looks like with ggez.
-    /// We have a function that takes in a `&mut ggez::Context` which we use
-    /// with the helpers in `ggez::graphics` to do drawing. We also return a
-    /// `ggez::GameResult` so that we can use the `?` operator to bubble up
-    /// failure of drawing.
-    ///
-    /// Note: this method of drawing does not scale. If you need to render
-    /// a large number of shapes, use a SpriteBatch. This approach is fine for
-    /// this example since there are a fairly limited number of calls.
-    fn draw(&self, ctx: &mut Context) -> GameResult<()> {
-        // First we set the color to draw with, in this case all food will be
-        // colored blue.
-        let color = [0.0, 0.0, 1.0, 1.0].into();
-        // Then we draw a rectangle with the Fill draw mode, and we convert the
-        // Food's position into a `ggez::Rect` using `.into()` which we can do
-        // since we implemented `From<GridPosition>` for `Rect` earlier.
-        let rectangle =
-            graphics::Mesh::new_rectangle(ctx, graphics::DrawMode::fill(), self.pos.into(), color)?;
-        graphics::draw(ctx, &rectangle, (ggez::mint::Point2 { x: 0.0, y: 0.0 },))
-    }
-}
+        let (width, height) = graphics::drawable_size(ctx);
+        let s = MainState {
+            player,
+            shots: Vec::new(),
+            rocks,
+            level: 0,
+            score: 0,
+            assets,
+            screen_width: width,
+            screen_height: height,
+            input: InputState::default(),
+            player_shot_timeout: 0.0,
+        };
 
-/// Here we define an enum of the possible things that the snake could have "eaten"
-/// during an update of the game. It could have either eaten a piece of `Food`, or
-/// it could have eaten `Itself` if the head ran into its body.
-#[derive(Clone, Copy, Debug)]
-enum Ate {
-    Itself,
-    Food,
-}
-
-/// Now we make a struct that contains all the information needed to describe the
-/// state of the Snake itself.
-struct Snake {
-    /// First we have the head of the snake, which is a single `Segment`.
-    head: Segment,
-    /// Then we have the current direction the snake is moving. This is
-    /// the direction it will move when `update` is called on it.
-    dir: Direction,
-    /// Next we have the body, which we choose to represent as a `LinkedList`
-    /// of `Segment`s.
-    body: LinkedList<Segment>,
-    /// Now we have a property that represents the result of the last update
-    /// that was performed. The snake could have eaten nothing (None), Food (Some(Ate::Food)),
-    /// or Itself (Some(Ate::Itself))
-    ate: Option<Ate>,
-    /// Finally we store the direction that the snake was traveling the last
-    /// time that `update` was called, which we will use to determine valid
-    /// directions that it could move the next time update is called.
-    last_update_dir: Direction,
-    /// Store the direction that will be used in the `update` after the next `update`
-    /// This is needed so a user can press two directions (eg. left then up)
-    /// before one `update` has happened. It sort of queues up key press input
-    next_dir: Option<Direction>,
-}
-
-impl Snake {
-    pub fn new(pos: GridPosition) -> Self {
-        let mut body = LinkedList::new();
-        // Our snake will initially have a head and one body segment,
-        // and will be moving to the right.
-        body.push_back(Segment::new((pos.x - 1, pos.y).into()));
-        Snake {
-            head: Segment::new(pos),
-            dir: Direction::Right,
-            last_update_dir: Direction::Right,
-            body: body,
-            ate: None,
-            next_dir: None,
-        }
+        Ok(s)
     }
 
-    /// A helper function that determines whether
-    /// the snake eats a given piece of Food based
-    /// on its current position
-    fn eats(&self, food: &Food) -> bool {
-        if self.head.pos == food.pos {
-            true
-        } else {
-            false
-        }
+    fn fire_player_shot(&mut self) {
+        self.player_shot_timeout = PLAYER_SHOT_TIME;
+
+        let player = &self.player;
+        let mut shot = create_shot();
+        shot.pos = player.pos;
+        shot.facing = player.facing;
+        let direction = vec_from_angle(shot.facing);
+        shot.velocity.x = SHOT_SPEED * direction.x;
+        shot.velocity.y = SHOT_SPEED * direction.y;
+
+        self.shots.push(shot);
+
+        let _ = self.assets.shot_sound.play();
     }
 
-    /// A helper function that determines whether
-    /// the snake eats itself based on its current position
-    fn eats_self(&self) -> bool {
-        for seg in self.body.iter() {
-            if self.head.pos == seg.pos {
-                return true;
+    fn clear_dead_stuff(&mut self) {
+        self.shots.retain(|s| s.life > 0.0);
+        self.rocks.retain(|r| r.life > 0.0);
+    }
+
+    fn handle_collisions(&mut self) {
+        for rock in &mut self.rocks {
+            let pdistance = rock.pos - self.player.pos;
+            if pdistance.norm() < (self.player.bbox_size + rock.bbox_size) {
+                self.player.life = 0.0;
             }
-        }
-        false
-    }
+            for shot in &mut self.shots {
+                let distance = shot.pos - rock.pos;
+                if distance.norm() < (shot.bbox_size + rock.bbox_size) {
+                    shot.life = 0.0;
+                    rock.life = 0.0;
+                    self.score += 1;
 
-    /// The main update function for our snake which gets called every time
-    /// we want to update the game state.
-    fn update(&mut self, food: &Food) {
-        // If `last_update_dir` has already been updated to be the same as `dir`
-        // and we have a `next_dir`, then set `dir` to `next_dir` and unset `next_dir`
-        if self.last_update_dir == self.dir && self.next_dir.is_some() {
-            self.dir = self.next_dir.unwrap();
-            self.next_dir = None;
-        }
-        // First we get a new head position by using our `new_from_move` helper
-        // function from earlier. We move our head in the direction we are currently
-        // heading.
-        let new_head_pos = GridPosition::new_from_move(self.head.pos, self.dir);
-        // Next we create a new segment will be our new head segment using the
-        // new position we just made.
-        let new_head = Segment::new(new_head_pos);
-        // Then we push our current head Segment onto the front of our body
-        self.body.push_front(self.head);
-        // And finally make our actual head the new Segment we created. This has
-        // effectively moved the snake in the current direction.
-        self.head = new_head;
-        // Next we check whether the snake eats itself or some food, and if so,
-        // we set our `ate` member to reflect that state.
-        if self.eats_self() {
-            self.ate = Some(Ate::Itself);
-        } else if self.eats(food) {
-            self.ate = Some(Ate::Food);
-        } else {
-            self.ate = None
-        }
-        // If we didn't eat anything this turn, we remove the last segment from our body,
-        // which gives the illusion that the snake is moving. In reality, all the segments stay
-        // stationary, we just add a segment to the front and remove one from the back. If we eat
-        // a piece of food, then we leave the last segment so that we extend our body by one.
-        if let None = self.ate {
-            self.body.pop_back();
-        }
-        // And set our last_update_dir to the direction we just moved.
-        self.last_update_dir = self.dir;
-    }
-
-    /// Here we have the Snake draw itself. This is very similar to how we saw the Food
-    /// draw itself earlier.
-    ///
-    /// Again, note that this approach to drawing is fine for the limited scope of this
-    /// example, but larger scale games will likely need a more optimized render path
-    /// using SpriteBatch or something similar that batches draw calls.
-    fn draw(&self, ctx: &mut Context) -> GameResult<()> {
-        // We first iterate through the body segments and draw them.
-        for seg in self.body.iter() {
-            // Again we set the color (in this case an orangey color)
-            // and then draw the Rect that we convert that Segment's position into
-            let rectangle = graphics::Mesh::new_rectangle(
-                ctx,
-                graphics::DrawMode::fill(),
-                seg.pos.into(),
-                [0.3, 0.3, 0.0, 1.0].into(),
-            )?;
-            graphics::draw(ctx, &rectangle, (ggez::mint::Point2 { x: 0.0, y: 0.0 },))?;
-        }
-        // And then we do the same for the head, instead making it fully red to distinguish it.
-        let rectangle = graphics::Mesh::new_rectangle(
-            ctx,
-            graphics::DrawMode::fill(),
-            self.head.pos.into(),
-            [1.0, 0.5, 0.0, 1.0].into(),
-        )?;
-        graphics::draw(ctx, &rectangle, (ggez::mint::Point2 { x: 0.0, y: 0.0 },))?;
-        Ok(())
-    }
-}
-
-/// Now we have the heart of our game, the GameState. This struct
-/// will implement ggez's `EventHandler` trait and will therefore drive
-/// everything else that happens in our game.
-struct GameState {
-    /// First we need a Snake
-    snake: Snake,
-    /// A piece of food
-    food: Food,
-    /// Whether the game is over or not
-    gameover: bool,
-    /// And we track the last time we updated so that we can limit
-    /// our update rate.
-    last_update: Instant,
-}
-
-impl GameState {
-    /// Our new function will set up the initial state of our game.
-    pub fn new() -> Self {
-        // First we put our snake a quarter of the way across our grid in the x axis
-        // and half way down the y axis. This works well since we start out moving to the right.
-        let snake_pos = (GRID_SIZE.0 / 4, GRID_SIZE.1 / 2).into();
-        // Then we choose a random place to put our piece of food using the helper we made
-        // earlier.
-        let food_pos = GridPosition::random(GRID_SIZE.0, GRID_SIZE.1);
-
-        GameState {
-            snake: Snake::new(snake_pos),
-            food: Food::new(food_pos),
-            gameover: false,
-            last_update: Instant::now(),
-        }
-    }
-}
-
-/// Now we implement EventHandler for GameState. This provides an interface
-/// that ggez will call automatically when different events happen.
-impl event::EventHandler for GameState {
-    /// Update will happen on every frame before it is drawn. This is where we update
-    /// our game state to react to whatever is happening in the game world.
-    fn update(&mut self, _ctx: &mut Context) -> GameResult {
-        // First we check to see if enough time has elapsed since our last update based on
-        // the update rate we defined at the top.
-        if Instant::now() - self.last_update >= Duration::from_millis(MILLIS_PER_UPDATE) {
-            // Then we check to see if the game is over. If not, we'll update. If so, we'll just do nothing.
-            if !self.gameover {
-                // Here we do the actual updating of our game world. First we tell the snake to update itself,
-                // passing in a reference to our piece of food.
-                self.snake.update(&self.food);
-                // Next we check if the snake ate anything as it updated.
-                if let Some(ate) = self.snake.ate {
-                    // If it did, we want to know what it ate.
-                    match ate {
-                        // If it ate a piece of food, we randomly select a new position for our piece of food
-                        // and move it to this new position.
-                        Ate::Food => {
-                            let new_food_pos = GridPosition::random(GRID_SIZE.0, GRID_SIZE.1);
-                            self.food.pos = new_food_pos;
-                        }
-                        // If it ate itself, we set our gameover state to true.
-                        Ate::Itself => {
-                            self.gameover = true;
-                        }
-                    }
+                    let _ = self.assets.hit_sound.play();
                 }
             }
-            // If we updated, we set our last_update to be now
-            self.last_update = Instant::now();
         }
-        // Finally we return `Ok` to indicate we didn't run into any errors
+    }
+
+    fn check_for_level_respawn(&mut self) {
+        if self.rocks.is_empty() {
+            self.level += 1;
+            let r = create_rocks(self.level + 5, self.player.pos, 100.0, 250.0);
+            self.rocks.extend(r);
+        }
+    }
+}
+
+/// **********************************************************************
+/// A couple of utility functions.
+/// **********************************************************************
+
+fn print_instructions() {
+    println!();
+    println!("Welcome to ASTROBLASTO!");
+    println!();
+    println!("How to play:");
+    println!("L/R arrow keys rotate your ship, up thrusts, space bar fires");
+    println!();
+}
+
+fn draw_actor(
+    assets: &mut Assets,
+    ctx: &mut Context,
+    actor: &Actor,
+    world_coords: (f32, f32),
+) -> GameResult {
+    let (screen_w, screen_h) = world_coords;
+    let pos = world_to_screen_coords(screen_w, screen_h, actor.pos);
+    let image = assets.actor_image(actor);
+    let drawparams = graphics::DrawParam::new()
+        .dest(mint::Point2 { x: pos.x, y: pos.y })
+        .rotation(actor.facing as f32)
+        .offset(mint::Point2 { x: 0.5, y: 0.5 });
+    graphics::draw(ctx, image, drawparams)
+}
+
+/// **********************************************************************
+/// Now we implement the `EventHandler` trait from `ggez::event`, which provides
+/// ggez with callbacks for updating and drawing our game, as well as
+/// handling input events.
+/// **********************************************************************
+impl EventHandler for MainState {
+    fn update(&mut self, ctx: &mut Context) -> GameResult {
+        const DESIRED_FPS: u32 = 60;
+
+        while timer::check_update_time(ctx, DESIRED_FPS) {
+            let seconds = 1.0 / (DESIRED_FPS as f32);
+
+            // Update the player state based on the user input.
+            player_handle_input(&mut self.player, &self.input, seconds);
+            self.player_shot_timeout -= seconds;
+            if self.input.fire && self.player_shot_timeout < 0.0 {
+                self.fire_player_shot();
+            }
+
+            // Update the physics for all actors.
+            // First the player...
+            update_actor_position(&mut self.player, seconds);
+            wrap_actor_position(
+                &mut self.player,
+                self.screen_width as f32,
+                self.screen_height as f32,
+            );
+
+            // Then the shots...
+            for act in &mut self.shots {
+                update_actor_position(act, seconds);
+                wrap_actor_position(act, self.screen_width as f32, self.screen_height as f32);
+                handle_timed_life(act, seconds);
+            }
+
+            // And finally the rocks.
+            for act in &mut self.rocks {
+                update_actor_position(act, seconds);
+                wrap_actor_position(act, self.screen_width as f32, self.screen_height as f32);
+            }
+
+            // Handle the results of things moving:
+            // collision detection, object death, and if
+            // we have killed all the rocks in the level,
+            // spawn more of them.
+            self.handle_collisions();
+
+            self.clear_dead_stuff();
+
+            self.check_for_level_respawn();
+
+            // Finally we check for our end state.
+            // I want to have a nice death screen eventually,
+            // but for now we just quit.
+            if self.player.life <= 0.0 {
+                println!("Game over!");
+                let _ = event::quit(ctx);
+            }
+        }
+
         Ok(())
     }
 
-    /// draw is where we should actually render the game's current state.
     fn draw(&mut self, ctx: &mut Context) -> GameResult {
-        // First we clear the screen to a nice (well, maybe pretty glaring ;)) green
-        graphics::clear(ctx, [0.0, 1.0, 0.0, 1.0].into());
-        // Then we tell the snake and the food to draw themselves
-        self.snake.draw(ctx)?;
-        self.food.draw(ctx)?;
-        // Finally we call graphics::present to cycle the gpu's framebuffer and display
-        // the new frame we just drew.
+        // Our drawing is quite simple.
+        // Just clear the screen...
+        graphics::clear(ctx, graphics::BLACK);
+
+        // Loop over all objects drawing them...
+        {
+            let assets = &mut self.assets;
+            let coords = (self.screen_width, self.screen_height);
+
+            let p = &self.player;
+            draw_actor(assets, ctx, p, coords)?;
+
+            for s in &self.shots {
+                draw_actor(assets, ctx, s, coords)?;
+            }
+
+            for r in &self.rocks {
+                draw_actor(assets, ctx, r, coords)?;
+            }
+        }
+
+        // And draw the GUI elements in the right places.
+        let level_dest = mint::Point2 { x: 10.0, y: 10.0 };
+        let score_dest = mint::Point2 { x: 200.0, y: 10.0 };
+
+        let level_str = format!("Level: {}", self.level);
+        let score_str = format!("Score: {}", self.score);
+        let level_display = graphics::Text::new((level_str, self.assets.font, 32.0));
+        let score_display = graphics::Text::new((score_str, self.assets.font, 32.0));
+        graphics::draw(ctx, &level_display, (level_dest, 0.0, graphics::WHITE))?;
+        graphics::draw(ctx, &score_display, (score_dest, 0.0, graphics::WHITE))?;
+
+        // Then we flip the screen...
         graphics::present(ctx)?;
-        // We yield the current thread until the next update
-        ggez::timer::yield_now();
-        // And return success.
+
+        // And yield the timeslice
+        // This tells the OS that we're done using the CPU but it should
+        // get back to this program as soon as it can.
+        // This ideally prevents the game from using 100% CPU all the time
+        // even if vsync is off.
+        // The actual behavior can be a little platform-specific.
+        timer::yield_now();
         Ok(())
     }
 
-    /// key_down_event gets fired when a key gets pressed.
+    // Handle key events.  These just map keyboard events
+    // and alter our input state appropriately.
     fn key_down_event(
         &mut self,
-        _ctx: &mut Context,
+        ctx: &mut Context,
         keycode: KeyCode,
         _keymod: KeyMods,
         _repeat: bool,
     ) {
-        // Here we attempt to convert the Keycode into a Direction using the helper
-        // we defined earlier.
-        if let Some(dir) = Direction::from_keycode(keycode) {
-            // If it succeeds, we check if a new direction has already been set
-            // and make sure the new direction is different then `snake.dir`
-            if self.snake.dir != self.snake.last_update_dir && dir.inverse() != self.snake.dir {
-                self.snake.next_dir = Some(dir);
-            } else if dir.inverse() != self.snake.last_update_dir {
-                // If no new direction has been set and the direction is not the inverse
-                // of the `last_update_dir`, then set the snake's new direction to be the
-                // direction the user pressed.
-                self.snake.dir = dir;
+        match keycode {
+            KeyCode::Up => {
+                self.input.yaxis = 1.0;
             }
+            KeyCode::Left => {
+                self.input.xaxis = -1.0;
+            }
+            KeyCode::Right => {
+                self.input.xaxis = 1.0;
+            }
+            KeyCode::Space => {
+                self.input.fire = true;
+            }
+            KeyCode::P => {
+                let img = graphics::screenshot(ctx).expect("Could not take screenshot");
+                img.encode(ctx, graphics::ImageFormat::Png, "/screenshot.png")
+                    .expect("Could not save screenshot");
+            }
+            KeyCode::Escape => event::quit(ctx),
+            _ => (), // Do nothing
+        }
+    }
+
+    fn key_up_event(&mut self, _ctx: &mut Context, keycode: KeyCode, _keymod: KeyMods) {
+        match keycode {
+            KeyCode::Up => {
+                self.input.yaxis = 0.0;
+            }
+            KeyCode::Left | KeyCode::Right => {
+                self.input.xaxis = 0.0;
+            }
+            KeyCode::Space => {
+                self.input.fire = false;
+            }
+            _ => (), // Do nothing
         }
     }
 }
 
-fn main() -> GameResult {
-    // Here we use a ContextBuilder to setup metadata about our game. First the title and author
-    let (ctx, events_loop) = &mut ggez::ContextBuilder::new("snake", "Gray Olson")
-        // Next we set up the window. This title will be displayed in the title bar of the window.
-        .window_setup(ggez::conf::WindowSetup::default().title("Snake!"))
-        // Now we get to set the size of the window, which we use our SCREEN_SIZE constant from earlier to help with
-        .window_mode(ggez::conf::WindowMode::default().dimensions(SCREEN_SIZE.0, SCREEN_SIZE.1))
-        // And finally we attempt to build the context and create the window. If it fails, we panic with the message
-        // "Failed to build ggez context"
-        .build()?;
+/// **********************************************************************
+/// Finally our main function!  Which merely sets up a config and calls
+/// `ggez::event::run()` with our `EventHandler` type.
+/// **********************************************************************
 
-    // Next we create a new instance of our GameState struct, which implements EventHandler
-    let state = &mut GameState::new();
-    // And finally we actually run our game, passing in our context and state.
-    event::run(ctx, events_loop, state)
+pub fn main() -> GameResult {
+    // We add the CARGO_MANIFEST_DIR/resources to the resource paths
+    // so that ggez will look in our cargo project directory for files.
+    let resource_dir = if let Ok(manifest_dir) = env::var("CARGO_MANIFEST_DIR") {
+        let mut path = path::PathBuf::from(manifest_dir);
+        path.push("resources");
+        path
+    } else {
+        path::PathBuf::from("./resources")
+    };
+
+    let cb = ContextBuilder::new("astroblasto", "ggez")
+        .window_setup(conf::WindowSetup::default().title("Astroblasto!"))
+        .window_mode(conf::WindowMode::default().dimensions(640.0, 480.0))
+        .add_resource_path(resource_dir);
+
+    let (ctx, events_loop) = &mut cb.build()?;
+
+    let game = &mut MainState::new(ctx)?;
+    event::run(ctx, events_loop, game)
 }
